@@ -77,6 +77,7 @@ def annulus(r_inner,r_outer,z_length,numberOfRadialElements,numberOfCircumferent
     xfix_node_list = []
     internal_node_list = []
     outer_node_list = []
+
     elems = []
     elem_n = numberOfRadialElements * numberOfCircumferentialElements * numberOfZElements
     rad_node_n = numberOfRadialElements * InterpolationType
@@ -154,14 +155,14 @@ def annulus(r_inner,r_outer,z_length,numberOfRadialElements,numberOfCircumferent
                 if (ridx==ridx_end-1):
                     outer_node_list.append([node_idx])
                 node_map[ridx, thetaidx, zidx] = node_idx
-    print('Total nodes in mesh=',len(node_list))
-    print(node_map)
+    #print('Total nodes in mesh=',len(node_list))
+    #print(node_map)
     if numberOfCircumferentialElements > 1:
         end_points = np.array([[node_map[x, 0, :]] for x in range(0, ridx_end, 1)])
         node_map = np.concatenate((node_map, end_points), axis=1)
         thetaidx_end += 1
 
-    e_assign = np.zeros((elem_n, 27))
+    e_assign = np.zeros((elem_n, 27),dtype=np.int32)
     e = 0
     for i in range(0, ridx_end, 2):
         for j in range(0, thetaidx_end, 2):
@@ -171,6 +172,7 @@ def annulus(r_inner,r_outer,z_length,numberOfRadialElements,numberOfCircumferent
                 e_assign[e, :] = node_map[i:(i+3), j:(j+3), k:(k+3)].flatten()
                 e += 1
 
+    print('Total elements in mesh=',len(e_assign))
     print(e_assign)
 
     return node_list, node_idx_list, top_node_list,bottom_node_list, yfix_node_list, xfix_node_list, internal_node_list, outer_node_list, e_assign

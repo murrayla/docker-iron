@@ -59,6 +59,8 @@ import math
 import numpy as np
 import meshio
 import generateMesh
+import scipy.optimize
+import matplotlib.pyplot as plt
 
 # VIJAY_IRON = [
 #     6, 3, 0, 15, 12, 9, 24, 21, 18,
@@ -84,10 +86,9 @@ import generateMesh
 #     8, 17, 26, 5, 14, 23, 2, 11, 20
 # ]
 
-
 #Setting up the vtk output function before use after solve.
 
-def vtkoutput(totalNumberOfNodes, totalNumberOfElements, mesh,geo_field,dep_field):
+def vtkoutput(filenameroot,totalNumberOfNodes, totalNumberOfElements, mesh,geo_field,dep_field):
     X = 1
     Y = 2
     Z = 3
@@ -196,24 +197,29 @@ def vtkoutput(totalNumberOfNodes, totalNumberOfElements, mesh,geo_field,dep_fiel
     # +============+
     # Store data files
     # +============+
-    node_file = open('output_mesh.node', 'w')
+    filename = filenameroot+'.node'
+    node_file = open(filename, 'w')
     node_file.writelines([str(line) + "\n" for line in n_list])
     node_file.close()
-    elem_file=open('output_mesh.ele','w')
+    filename = filenameroot+'.ele'
+    elem_file=open(filename,'w')
     elem_file.writelines([str(line) + "\n" for line in e_list])
     elem_file.close()
     bef_def = np.array(n_bef)
     aft_def = np.array(n_aft)
-    np.save('output_mesh_before_def.npy',bef_def)
-    np.save('output_mesh_after_def.npy',aft_def)
+    filename = filenameroot+'_mesh_before_def.npy'
+    np.save(filename,bef_def)
+    filename = filenameroot+'_mesh_after_def.npy'
+    np.save(filename,aft_def)
     # +============+
     # VTK export
     # +============+
-
+    filename = filenameroot+'.vtk'
+    print([("hexahedron27", e_list_vtk)] + [("hexahedron27", e_list_vtk)])
     meshio.write_points_cells(
-        "output.vtk",
+        filename,
         bef_def,
-        [("hexahedron27", e_list_vtk)] + [("hexahedron27", e_list_vtk)],
+        [("hexahedron27", e_list_vtk)], #+ [("hexahedron27", e_list_vtk)],
         {"deformed": aft_def-bef_def}
     )
 
@@ -228,15 +234,18 @@ z_length = 1.0
 c10 = 2.0
 c01 = 6.0
 #loading conditions
-pressure_internal = 0.0
+pressure_internal = 1.5
 pressure_external = 0.0
-stretch_ratio = 0.2
+stretch_ratio = 1.2
 twist_angle = 0.0 #math.pi/6.0  #in radians
 #mesh parameters
-#set number of elements in each direction of cylinder.
-numberOfRadialElements = 2
-numberOfCircumferentialElements = 4
-numberOfZElements = 2
+#set number of elements in each direction of cylinder by setting refined_mesh_option.
+#set refinement option stored in a list as [radial,circumferential,z]
+refined_mesh = [[1,4,1],[1,8,1],[2,4,1],[2,8,1],[2,8,2],[4,16,2],[4,16,8],[4,32,16],[8,64,16]]
+refined_mesh_option = 7
+numberOfRadialElements = refined_mesh[refined_mesh_option][0]
+numberOfCircumferentialElements = refined_mesh[refined_mesh_option][1]
+numberOfZElements = refined_mesh[refined_mesh_option][2]
 #set geometric basis interpolation to one of:
 # 1 - linear lagrange
 # 2 - quadratic lagrange
@@ -251,6 +260,7 @@ numberOfZElements = 2
 InterpolationType = 2
 #decide if you want to use a pressure basis for the pressure field
 UsePressureBasis = False
+numberOfLoadIncrements = 3
 #From here the code sets up the problem with the inputs from above.
 
 # Set OpenCMISS parameters
@@ -269,7 +279,8 @@ dependentFieldUserNumber = 4
 equationsSetUserNumber = 1
 equationsSetFieldUserNumber = 5
 problemUserNumber = 1
-
+dataPointsUserNumber=1
+dataProjectionUserNumber=1
 # Get the number of computational nodes and this computational node number
 numberOfComputationalNodes = iron.ComputationalNumberOfNodesGet()
 computationalNodeNumber = iron.ComputationalNodeNumberGet()
@@ -390,6 +401,7 @@ elements.CreateStart(mesh,meshComponentNumber,geometricBasis)
 for elemidx in range(0, len(e_assign[:,0]), 1):
     elemNum = elemidx+1
     # elemNodes = np.array(e_assign[elemidx, VIJAY_IRON], dtype=np.int32)
+    print('element number:', int(elemNum))
     elemNodes = np.array(e_assign[elemidx], dtype=np.int32)
     # print('listing each element nodes')
     elements.NodesSet(int(elemNum), elemNodes)
@@ -543,6 +555,9 @@ problem.CreateFinish()
 
 # Create control loops
 problem.ControlLoopCreateStart()
+controlLoop = iron.ControlLoop()
+problem.ControlLoopGet([iron.ControlLoopIdentifiers.NODE],controlLoop)
+controlLoop.MaximumIterationsSet(numberOfLoadIncrements)
 problem.ControlLoopCreateFinish()
 
 # Create problem solver
@@ -550,7 +565,7 @@ nonLinearSolver = iron.Solver()
 linearSolver = iron.Solver()
 problem.SolversCreateStart()
 problem.SolverGet([iron.ControlLoopIdentifiers.NODE],1,nonLinearSolver)
-nonLinearSolver.outputType = iron.SolverOutputTypes.NONE
+nonLinearSolver.outputType = iron.SolverOutputTypes.PROGRESS
 nonLinearSolver.NewtonJacobianCalculationTypeSet(iron.JacobianCalculationTypes.FD)
 nonLinearSolver.NewtonLinearSolverGet(linearSolver)
 linearSolver.linearType = iron.LinearSolverTypes.DIRECT
@@ -571,30 +586,38 @@ problem.SolverEquationsCreateFinish()
 boundaryConditions = iron.BoundaryConditions()
 solverEquations.BoundaryConditionsCreateStart(boundaryConditions)
 
-locked, extended, pressured = [], [], []
+locked, locked_rotation_x,locked_rotation_y, extended, pressured = [], [], [], [],[]
 for i in node_idx_list:
     idx = i[0]-1
+    #print(node_list[idx])
     if np.isclose(node_list[idx][2], 0):
-        locked.append(idx)
-        boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,idx+1,3,iron.BoundaryConditionsTypes.FIXED_INCREMENTED,0.0)
-        boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,idx+1,2,iron.BoundaryConditionsTypes.FIXED_INCREMENTED,0.0)
-        boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,idx+1,1,iron.BoundaryConditionsTypes.FIXED_INCREMENTED,0.0)
-        continue
+       locked.append(idx)
+       boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,idx+1,3,iron.BoundaryConditionsTypes.FIXED_INCREMENTED,0.0)
+       if np.isclose(node_list[idx][0], 0):
+            locked_rotation_x.append(idx)
+            boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,idx+1,1,iron.BoundaryConditionsTypes.FIXED_INCREMENTED,0.0)
+       elif np.isclose(node_list[idx][1], 0):
+            locked_rotation_y.append(idx)
+            boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,idx+1,2,iron.BoundaryConditionsTypes.FIXED_INCREMENTED,0.0)
+       continue
     if np.isclose(node_list[idx][2], z_length):
-        extended.append(idx)
-        boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,idx+1,3,iron.BoundaryConditionsTypes.FIXED_INCREMENTED,0.2)
-    # if np.isclose(np.linalg.norm([node_list[idx][0], node_list[idx][1]]), r_inner):
-    #     pressured.append(idx)
-    #     boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.DELUDELN,1,1,nodeNum,3,iron.BoundaryConditionsTypes.PRESSURE_INCREMENTED,pressure_internal)
-    #     continue
-    # if np.isclose(np.linalg.norm([node_list[idx][0], node_list[idx][1]]), r_outer):
-    #     pressured.append(idx)
-    #     boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.DELUDELN,1,1,nodeNum,3,iron.BoundaryConditionsTypes.PRESSURE_INCREMENTED,pressure_external)
-    #     continue
+       extended.append(idx)
+       boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,idx+1,3,iron.BoundaryConditionsTypes.FIXED_INCREMENTED,(stretch_ratio*z_length)-z_length)
+       continue
+    if np.isclose(np.linalg.norm([node_list[idx][0], node_list[idx][1]]), r_inner):
+       pressured.append(idx)
+       boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.DELUDELN,1,1,idx+1,3,iron.BoundaryConditionsTypes.PRESSURE_INCREMENTED,pressure_internal)
+       continue
+    if np.isclose(np.linalg.norm([node_list[idx][0], node_list[idx][1]]), r_outer):
+       pressured.append(idx)
+       boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.DELUDELN,1,1,idx+1,3,iron.BoundaryConditionsTypes.PRESSURE_INCREMENTED,pressure_external)
+       continue
 
-print("LOCKED: {}".format(locked))
-print("PRESSURED: {}".format(pressured))
-print("EXTENDED: {}".format(extended))
+#print("LOCKED: {}".format(locked))
+#print("LOCKED_ROTATION_X: {}".format(locked_rotation_x))
+#print("LOCKED_ROTATION_Y: {}".format(locked_rotation_y))
+#print("PRESSURED: {}".format(pressured))
+#print("EXTENDED: {}".format(extended))
 
 # for nodeidx in range(0,len(bottom_node_list),1):
 #     nodeNum = bottom_node_list[nodeidx][0]
@@ -627,11 +650,213 @@ solverEquations.BoundaryConditionsCreateFinish()
 
 # Solve the problem
 problem.Solve()
+#output deformed geometry
+filenameroot = 'output_refined_mesh_'+str(refined_mesh_option)
+vtkoutput(filenameroot,len(node_list),totalNumberOfElements,mesh,geometricField,dependentField)
+###Generate results to check the stresses and strains
+#Create lines of points to evaluate results at
+# datapoints_radii = np.linspace(r_inner+0.1,r_outer-0.1,1)
+# datalines_theta = np.linspace(0.1,2.0*math.pi,1)
+# datalines_z = np.linspace(0.1,z_length-0.1,1)
+# datalines = []
+# numDataPoints = 0
+# for datalineidx in range(0,1):
+#     dataline_z = datalines_z[datalineidx]
+#     dataline_theta = datalines_theta[datalineidx]
+#     dataline = []
+#     for pointidx in range(0,len(datapoints_radii),1):
+#         datapoint_radius = datapoints_radii[pointidx]
+#         datapoint_x = datapoint_radius*math.cos(dataline_theta)
+#         datapoint_y = datapoint_radius*math.sin(dataline_theta)
+#         datapoint_z = dataline_z
+#         dataline.append([datapoint_x,datapoint_y,datapoint_z])
+#         print('datapoint=',[datapoint_x,datapoint_y,datapoint_z])
+#         numDataPoints = numDataPoints+1
+#     datalines.append(dataline)
+# dataPoints = iron.DataPoints()
+# dataPoints.CreateStart(dataPointsUserNumber,region,numDataPoints)
+#
+# #convert list of points into opencmiss datapoints object
+# datapointidx = 0
+# for datalineidx in range(0,len(datalines),1):
+#     dataline = datalines[datalineidx]
+#     for pointidx in range(0,len(dataline),1):
+#         datapointidx=datapointidx+1
+#         datapoint = dataline[pointidx]
+#         # Set up data projection
+#         dataPoints.PositionSet(datapointidx,datapoint)
+# dataPoints.CreateFinish()
+# print('checking datapoints have been set correctly')
+# for datapointidx in range(1,numDataPoints+1,1):
+#     print(dataPoints.PositionGet(datapointidx,3))
+# print('Project datapoints into finite element mesh using dataprojections object.')
+# dataProjections=iron.DataProjection()
+# dataProjections.CreateStart(dataProjectionUserNumber,dataPoints,geometricField,iron.FieldVariableTypes.U)
+# dataProjections.projectionType = iron.DataProjectionProjectionTypes.ALL_ELEMENTS
+# dataProjections.CreateFinish()
+#
+# print('evaluate data projects based on gemetric field')
+# dataProjections.DataPointsProjectionEvaluate(iron.FieldParameterSetTypes.VALUES)
+# # Create mesh topology for data projection
+# mesh.TopologyDataPointsCalculateProjection(dataProjections)
+# # Create decomposition topology for data projection
+# decomposition.TopologyDataProjectionCalculate()
+# dataProjections.ResultAnalysisOutput("")
+#
+# print('for each dataline, extract the tensors and invariants and store them in a dictionary')
+# datalines_sigma_xx, datalines_sigma_yy, datalines_sigma_zz, datalines_sigma_xy, datalines_sigma_xz, datalines_sigma_yz = [],[],[],[],[],[]
+# for datalineidx in range(0,len(datalines),1):
+#     dataline = datalines[datalineidx]
+#     dataline_sigma_xx,dataline_sigma_yy,dataline_sigma_zz,dataline_sigma_xy,dataline_sigma_xz,dataline_sigma_yz = [],[],[],[],[],[]
+#     for pointidx in range(0,len(dataline),1):
+#         datapointidx = datalineidx*len(dataline)+pointidx+1
+#         xiPosition = dataProjections.ResultXiGet(datapointidx, 3)
+#         elementNumber = dataProjections.ResultElementNumberGet(datapointidx)
+#         TC = equationsSet.TensorInterpolateXi(iron.EquationsSetDerivedTensorTypes.CAUCHY_STRESS,elementNumber, xiPosition, (3, 3))
+#         dataline_sigma_xx.append(TC[0,0])
+#         dataline_sigma_yy.append(TC[1,1])
+#         dataline_sigma_zz.append(TC[2,2])
+#         dataline_sigma_xy.append(TC[0,1])
+#         dataline_sigma_xz.append(TC[0,2])
+#         dataline_sigma_yz.append(TC[1,2])
+#     datalines_sigma_yy.append(dataline_sigma_yy)
+#     datalines_sigma_zz.append(dataline_sigma_zz)
+#     datalines_sigma_xy.append(dataline_sigma_xy)
+#     datalines_sigma_xz.append(dataline_sigma_xz)
+#     datalines_sigma_yz.append(dataline_sigma_yz)
+#     datalines_sigma_xx.append(dataline_sigma_xx)
+#
+# print('plot the stresses as a function of radius, saved in stress.png')
+#
+#
+#
+# fig,axes = plt.subplots(3,2)
+#
+# axes[0,0].plot(datapoints_radii,datalines_sigma_xx[0])
+# #axes[0,0].set_ylim([-2.0,1.0])
+# axes[0,0].set_title("sigma_xx")
+#
+# axes[0,1].plot(datapoints_radii,datalines_sigma_yy[0])
+# axes[0,1].set_title("sigma_yy")
+#  #axes[0,1].set_ylim([2,5])
+# #
+# axes[1,0].plot(datapoints_radii,datalines_sigma_zz[0])
+# axes[1,0].set_title("sigma_zz")
+# # #axes[1,0].set_ylim([2,8])
+# #
+# axes[1,1].plot(datapoints_radii,datalines_sigma_xy[0])
+# axes[1,1].set_title("sigma_xy")
+# # #axes[1,0].set_ylim([2,8])
+#
+# plt.savefig("stress.png")
+#
 
-vtkoutput(len(node_list),totalNumberOfElements,mesh,geometricField,dependentField)
+results = {}
+elementNumbers = []
+if refined_mesh_option == 0:#[1,4,1]
+    elementNumbers = [1]
+    xipoint_radii = np.linspace(r_inner,r_outer,10)
+elif refined_mesh_option == 1:# [1,8,1]
+    elementNumbers = [1]
+    xipoint_radii = np.linspace(r_inner,r_outer,10)
+elif refined_mesh_option == 2:# [2,4,1]
+    elementNumbers=[1,5]
+    xipoint_radii = np.linspace(r_inner,r_outer,20)
+elif refined_mesh_option == 3:# [2,8,1]
+    elementNumbers=[1,9]
+    xipoint_radii = np.linspace(r_inner,r_outer,20)
+elif refined_mesh_option == 4:# [2,8,2]
+    elementNumbers=[1,17]
+    xipoint_radii = np.linspace(r_inner,r_outer,20)
+elif refined_mesh_option == 5:# [4,16,2]
+    elementNumbers=[1,33,65,97]
+    xipoint_radii = np.linspace(r_inner,r_outer,40)
+elif refined_mesh_option == 6:# [4,16,8]
+    elementNumbers=[1,129,257,385]
+    xipoint_radii = np.linspace(r_inner,r_outer,40)
+elif refined_mesh_option == 7:# [4,32,16]
+    elementNumbers=[1,513,1025,1537]
+    xipoint_radii = np.linspace(r_inner,r_outer,40)
+elif refined_mesh_option == 8:# [8,64,16]
+    elementNumbers=[1,513,1023,1537,2048,2561,3073,3585]
+    xipoint_radii = np.linspace(r_inner,r_outer,80)
+xis = []
+xi_3s = np.linspace(0, 1, 10)
+for xipoint in range(0, len(xi_3s), 1):
+    xi_3 = xi_3s[xipoint] #note that xi3 is the radial direction through the wall of each element
+    xi_2 = 0.5 #note that xi2 is the circumferential direction around the cylinder
+    xi_1 = 0.5 #note that xi1 is the axial direction along the cylinder
+    xis.append([xi_1, xi_2, xi_3])
+
+dataline_sigma_xx, dataline_sigma_yy, dataline_sigma_zz, dataline_sigma_xy, dataline_sigma_xz, dataline_sigma_yz = [],[],[],[],[],[]
+
+for elementNumber in elementNumbers:
+    for xipoint in range(0, len(xis), 1):
+        xiPosition = xis[xipoint]
+        TC = equationsSet.TensorInterpolateXi(iron.EquationsSetDerivedTensorTypes.CAUCHY_STRESS,elementNumber, xiPosition, (3, 3))
+        dataline_sigma_xx.append(TC[0,0])
+        dataline_sigma_yy.append(TC[1,1])
+        dataline_sigma_zz.append(TC[2,2])
+        dataline_sigma_xy.append(TC[0,1])
+        dataline_sigma_xz.append(TC[0,2])
+        dataline_sigma_yz.append(TC[1,2])
+
+
+print('plot the stresses as a function of radius, saved in stress png file')
+#
+#
+#
+fig,axes = plt.subplots(3,2)
+fig.suptitle("Stress vs Radius, Refined Mesh Option "+str(refined_mesh[refined_mesh_option]))
+
+#
+axes[0,0].plot(xipoint_radii,dataline_sigma_xx)
+# #axes[0,0].set_ylim([-2.0,1.0])
+axes[0,0].set_title("sigma_xx")
+#
+axes[0,1].plot(xipoint_radii,dataline_sigma_yy)
+axes[0,1].set_title("sigma_yy")
+#  #axes[0,1].set_ylim([2,5])
+# #
+axes[1,0].plot(xipoint_radii,dataline_sigma_zz)
+axes[1,0].set_title("sigma_zz")
+# # #axes[1,0].set_ylim([2,8])
+# #
+axes[1,1].plot(xipoint_radii,dataline_sigma_xy)
+axes[1,1].set_title("sigma_xy")
+# # #axes[1,0].set_ylim([2,8])
+#
+plt.savefig("stress_refined_mesh_option_"+str(refined_mesh_option)+".png")
+#
+#F = equationsSet.TensorInterpolateXi(iron.EquationsSetDerivedTensorTypes.DEFORMATION_GRADIENT,elementNumber, xiPosition, (3, 3))
+#results['Deformation Gradient Tensor'] = F
+
+#C = equationsSet.TensorInterpolateXi(
+#    iron.EquationsSetDerivedTensorTypes.R_CAUCHY_GREEN_DEFORMATION,
+#    elementNumber, xiPosition, (3, 3))
+#results['Right Cauchy-Green Deformation Tensor'] = C
+
+#E = equationsSet.TensorInterpolateXi(
+#    iron.EquationsSetDerivedTensorTypes.GREEN_LAGRANGE_STRAIN,
+#    elementNumber, xiPosition, (3, 3))
+#results['Green-Lagrange Strain Tensor'] = E
+
+
+#I1 = np.trace(C)
+#I2 = 0.5 * (np.trace(C) ** 2. - np.tensordot(C, C))
+#I3 = np.linalg.det(C)
+#results['Invariants'] = [I1, I2, I3]
+
+#TC = equationsSet.TensorInterpolateXi(
+#    iron.EquationsSetDerivedTensorTypes.CAUCHY_STRESS,
+#    elementNumber, xiPosition, (3, 3))
+#results['Cauchy Stress Tensor'] = TC
+#
+#print(results)
 # Export results
 fields = iron.Fields()
 fields.CreateRegion(region)
 fields.NodesExport("CylinderInflation","FORTRAN")
 fields.ElementsExport("CylinderInflation","FORTRAN")
 fields.Finalise()
+print('Program complete')
